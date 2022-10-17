@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+
+<launch>
+
+    <node pkg = "try_pcd" type = "add_pcd" name = "add_pcd" output = "screen">
+        <!-- path -->
+        <param name = "path_a" value = "/home/cyppt/catkin_ws/src/try_pcd/map1/GlobalMap.pcd" type="string" />
+        <!-- <param name = "path_b" value = "/home/cyppt/catkin_ws/src/try_pcd/map2/GlobalMap.pcd" type="string" /> -->
+        <param name = "path_b" value = "/home/cyppt/catkin_ws/src/try_pcd/map3/GlobalMap.pcd" type="string" />
+        <!-- 一些参数 说明在源文件中 -->
+        <param name = "ground_filter_init_select_num" value = "500" type="int" />
+        <param name = "estimate_plane_iter_max" value = "150" type="int" />
+        <param name = "ground_seeds_threshold" value = "-0.04" type="double" />
+        <param name = "ground_distance_threshold" value = "-0.04" type="double" />
+        <param name = "sensor_height" value = "1.0" type="double" />
+        <!-- map 1 GPS参数-->
+        <param name = "latitude_a" value = "24.3290088" type="double" />
+        <param name = "longitude_a" value = "109.3666008" type="double" />
+        <param name = "altitude_a" value = "97.947" type="double" />
+        <!-- map 2 -->
+        <!-- <param name = "latitude_b" value = "24.3323574" type="double" />
+        <param name = "longitude_b" value = "109.3665538" type="double" />
+        <param name = "altitude_b" value = "98.236" type="double" /> -->
+        <!-- map 3 -->
+        <param name = "latitude_b" value = "24.3340335" type="double" />
+        <param name = "longitude_b" value = "109.3700001" type="double" />
+        <param name = "altitude_b" value = "95.742" type="double" />
+    </node>
+
+</launch>
