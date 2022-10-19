@@ -77,6 +77,7 @@ private:
     pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_ptr_;
     pcl::PointCloud<pcl::PointXYZ>::Ptr ordered_cloud_ptr_;
     pcl::PointCloud<pcl::PointXYZOR>::Ptr cloud_2d_ptr_;
+    pcl::PointCloud<pcl::PointXYZI>::Ptr check_pcd_ptr_;
     pcl::BearingAngleImage cloud_ba_ptr_;
     Eigen::Vector3f pc_main_direction_;
     sensor_msgs::PointCloud2 output_;
@@ -96,6 +97,7 @@ public:
     double GetRandNum(double range_min, double range_max);
     double CalculateVariance(double parameter1);
     double CalculateGradient(double parameter1);
+    void CheckOrderedPC();
 };
 
 int cmp( const void *a ,const void *b);
@@ -109,14 +111,16 @@ int main(int argc, char **argv)
     ros::Rate loop_rate(1);
     slice_pcd1.PointCloundPCA();
     slice_pcd1.UnorderedPCToOrderedPC();
+    slice_pcd1.CheckOrderedPC();
     slice_pcd1.ProjectToHorizontalPlane();
-    //slice_pcd1.OptimizationODVL();
-    // while (ros::ok())
-    // {
-    //     slice_pcd1.Pub_pcd();
-    //     ros::spinOnce();
-    //     loop_rate.sleep();
-    // }
+   slice_pcd1.OptimizationODVL();
+    while (ros::ok())
+    {
+        slice_pcd1.Pub_pcd();
+        ros::spinOnce();
+        loop_rate.sleep();
+        slice_pcd1.CheckOrderedPC();
+    }
     // slice_pcd1.CheckPointCloud("map_to_slice");
     return 0;
 }
@@ -126,6 +130,7 @@ Cslice_pcd::Cslice_pcd(ros::NodeHandle nh)
     nh_ = nh;
     cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     cloud_2d_ptr_.reset(new pcl::PointCloud<pcl::PointXYZOR>);
+    check_pcd_ptr_.reset(new pcl::PointCloud<pcl::PointXYZI>);
 
     ordered_cloud_ptr_.reset(new pcl::PointCloud<pcl::PointXYZ>);
     ordered_cloud_ptr_->width = 18300;
@@ -323,73 +328,133 @@ void Cslice_pcd::PointCloundPCA()
 
 void Cslice_pcd::ProjectToHorizontalPlane()
 {
-    double x, y, z;  // 计算最优深度，在main direction 上的点
+    // BA角度变量
     double max_gray_optimal_depth = 0;
-    double aver_gray_optimal_depth = 0;
+    double aver_gray_optimal_depth = 0; 
+    double aver_ga_depth = 0;
+    double var_go = 0, var_ga = 0;
+    double theta = 0;
+    // 最优深度变量
+    double x, y, z;  // 计算最优深度，在main direction 上的点
+    double max_left_x = 0x3f3f3f , max_low_y = 0x3f3f3f; // 左下边界
+    float distance_a_b;
+    float distance_a_c;
+    float distance_b_c;
+    float cos_A;
+    float sin_A;
+    // 线束变量
+    float angle;
+    int scanID;
+    static int RING_ID_MAP_16[] = {0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8};  // 速腾雷达线束
+
     x = pc_main_direction_.x();
     y = pc_main_direction_.y();
     z = pc_main_direction_.z();
     
+    // 寻找点云 左下边界
     for (int i = 0; i < ordered_cloud_ptr_->height; i ++)
     {
         for (int j = 0; j < ordered_cloud_ptr_->width; j++)
         {
-            float angle = atan(ordered_cloud_ptr_->at(j,i).z / sqrt(pow(ordered_cloud_ptr_->at(j,i).x, 2) + pow(ordered_cloud_ptr_->at(j,i).y,2))) * 180 / M_PI; //计算激光雷达点倾斜角度，按照角度进行分类
-            int scanID = int((angle + 15) / 2 + 0.5);
-            static int RING_ID_MAP_16[] = {
-            0, 1, 2, 3, 4, 5, 6, 7, 15, 14, 13, 12, 11, 10, 9, 8};
+            if (ordered_cloud_ptr_->at(j,i).x < max_left_x) max_left_x = ordered_cloud_ptr_->at(j,i).x;
+            if (ordered_cloud_ptr_->at(j,i).y < max_low_y) max_low_y = ordered_cloud_ptr_->at(j,i).y;
+        }
+    }
+
+    std::cout << "max_left_x :" << max_left_x << "\nmax_low_y :" << max_low_y << "\n";
+    x += max_left_x;
+    y += max_low_y;
+
+    for (int i = 0; i < ordered_cloud_ptr_->height; i ++)
+    {
+        for (int j = 0; j < ordered_cloud_ptr_->width; j++)
+        {
+            // 激光雷达线束 未用到
+            angle = atan(ordered_cloud_ptr_->at(j,i).z / sqrt(pow(ordered_cloud_ptr_->at(j,i).x, 2) + pow(ordered_cloud_ptr_->at(j,i).y,2))) * 180 / M_PI; //计算激光雷达点倾斜角度，按照角度进行分类
+            scanID = int((angle + 15) / 2 + 0.5);
             pcl::PointXYZOR point;
             if (scanID > 15) scanID = 15;
             else if (scanID < 0 ) scanID = 0;
+            point.ring = RING_ID_MAP_16[scanID];
+
+            // 投影到水平面
             point.x = ordered_cloud_ptr_->at(j,i).x;
             point.y = ordered_cloud_ptr_->at(j,i).y;
             point.z = 0;
             point.gray_ODVL = 0;
+            // 计算深度信息 
+            // bearing angle
             if ( i < ordered_cloud_ptr_->height -1 && j < ordered_cloud_ptr_->width - 1)
             {
                 // 参考 github pcl 中bearing angle 的源码
-                double theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j,i + 1), ordered_cloud_ptr_->at(j + 1,i));
+                theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j,i + 1), ordered_cloud_ptr_->at(j + 1,i));
                 point.gray_bearing_angle = theta * 255 / 180;
             }
             else if (i == ordered_cloud_ptr_->height -1 && j < ordered_cloud_ptr_->width - 1)
             {
-                double theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j,i - 1), ordered_cloud_ptr_->at(j + 1,i));
+                theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j,i - 1), ordered_cloud_ptr_->at(j + 1,i));
                 point.gray_bearing_angle = theta * 255 / 180;
             }
             else if (i < ordered_cloud_ptr_->height -1 && j == ordered_cloud_ptr_->width - 1)
             {
-                double theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j - 1,i + 1), ordered_cloud_ptr_->at(j,i));
+                theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j - 1,i + 1), ordered_cloud_ptr_->at(j,i));
                 point.gray_bearing_angle = theta * 255 / 180;
             }
              else 
             {
-                double theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j - 1,i - 1), ordered_cloud_ptr_->at(j,i));
+                theta =  cloud_ba_ptr_.getAngle(ordered_cloud_ptr_->at(j - 1,i - 1), ordered_cloud_ptr_->at(j,i));
                 point.gray_bearing_angle = theta * 255 / 180;
             }
-            // a 原点 b 在main direction上的点 c 平面上的点  构成三角形
-            float distance_a_b = sqrt(x * x + y * y + z* z);
-            float distance_a_c = sqrt(pow(point.x, 2) + pow(point.y, 2) + pow(point.z, 2));
-            float distance_b_c = sqrt(pow(point.x - x, 2) + pow(point.y - y, 2) + pow(point.z - z, 2));
-            float cos_A = (pow(distance_a_b, 2) + pow(distance_a_c, 2) - pow(distance_b_c, 2))/(2 * distance_a_b * distance_a_c);
-            float sin_A = sqrt(1 - pow(cos_A , 2));
-            point.gray_ODVL = distance_a_c * sin_A; // 先将为 标准化的gray_optimal_depth 存在这里
-            if (point.gray_ODVL > max_gray_optimal_depth) max_gray_optimal_depth = point.gray_ODVL;
+             if ( point.gray_bearing_angle < 0)
+             {
+                //std::cout << "check theta:" << theta << "\n";
+                //std:: cout << "j(width) i(height) :" << j << " , " << i << "\n"; 
+                point.gray_bearing_angle = cloud_2d_ptr_->points[i * ordered_cloud_ptr_->width + j - 1].gray_bearing_angle;
+                // BA::getAngle 三边不构成三角形 会返回 nan 是 0度
+             }
+
+            // optimal_depth 未标准化到0-255
+            // a 点云左下边界 b 过a点且在main direction上的点 c 平面上的点  构成三角形
+            distance_a_b = sqrt(pow(max_left_x - x, 2) + pow(max_low_y - y, 2) + pow(0 - z, 2));
+            distance_a_c = sqrt(pow(max_left_x - point.x, 2) + pow(max_low_y - point.y, 2) + pow(0 -point.z, 2));
+            distance_b_c = sqrt(pow(point.x - x, 2) + pow(point.y - y, 2) + pow(point.z - z, 2));
+            cos_A = (pow(distance_a_b, 2) + pow(distance_a_c, 2) - pow(distance_b_c, 2))/(2 * distance_a_b * distance_a_c);
+            sin_A = sqrt(1 - pow(cos_A , 2));
+
+            if (distance_a_c != 0) point.gray_ODVL = distance_a_c * sin_A; // 先将未 标准化的gray_optimal_depth 存在这里
+            else point.gray_ODVL = 0; // distance_a_c == 0 则 不够成三角形 a 与 c 重合 距离为0
             aver_gray_optimal_depth += point.gray_ODVL;
-                 if (i % 100 == 0)
+            if (point.gray_ODVL < 0) std::cout <<"check error gd:" << point.gray_ODVL << "\n";
+            if (point.gray_ODVL > max_gray_optimal_depth) max_gray_optimal_depth = point.gray_ODVL;
+            //aver_gray_optimal_depth += point.gray_ODVL;
+            // if (j % 100 == 0)
+            // {
+            //     std::cout <<"check gb:" << point.gray_bearing_angle << "\n";
+            // }
+            if (aver_gray_optimal_depth <=0)
             {
-                std ::cout << "check gb :" << cloud_2d_ptr_->points[i].gray_bearing_angle << "\ncheck gd:" << cloud_2d_ptr_->points[i].gray_optimal_depth << "\n";
-                std::cout <<"gd:" << cloud_2d_ptr_->points[i].gray_ODVL << "\n";
+                std::cout <<"check sum gd:" << aver_gray_optimal_depth << "\n";
+                std::cout <<"check gd:" << point.gray_ODVL << "\n";
+                std::cout <<"check distance_a_c" << distance_a_c << "\n";
+                std::cout <<"check distance_a_b" << distance_a_b << "\n";
+                std::cout <<"check distance_b_c" << distance_b_c << "\n";
+                std::cout <<"cos_A " << cos_A  << "\n";
+                std::cout <<"sin_A" << sin_A << "\n";
+                aver_gray_optimal_depth = 0;
             }
             point.gray_optimal_depth = 0;
-            point.ring = RING_ID_MAP_16[scanID];
             cloud_2d_ptr_->push_back(point);
             //std::cout << "ring:"<<scanID << std::endl;
         }
     }
+
+    std::cout <<"sum gd:" << aver_gray_optimal_depth << "\n";
     aver_gray_optimal_depth /= cloud_2d_ptr_->size();
     std::cout << "size of 2d cloud :" << cloud_2d_ptr_->size() << "\n";
     std::cout <<"max gd:" << max_gray_optimal_depth << "\n";
     std::cout <<"aver gd:" << aver_gray_optimal_depth << "\n";
+
+    // 继续计算optimal_depth    使其标准化到0-255
     #pragma omp for // OpenMP并行化执行这条语句后的for循环，从而起到加速的效果
     for (int i = 0; i < cloud_2d_ptr_->size(); i++)
     {
@@ -399,9 +464,27 @@ void Cslice_pcd::ProjectToHorizontalPlane()
         //     std::cout <<"gd:" << cloud_2d_ptr_->points[i].gray_ODVL << "\n";
         // }
         cloud_2d_ptr_->points[i].gray_optimal_depth = cloud_2d_ptr_->points[i].gray_ODVL / max_gray_optimal_depth * 255;
+        if ( cloud_2d_ptr_->points[i].gray_optimal_depth > 255) cloud_2d_ptr_->points[i].gray_optimal_depth = 255;
+        else if ( cloud_2d_ptr_->points[i].gray_optimal_depth < 0)  cloud_2d_ptr_->points[i].gray_optimal_depth = 0;
         cloud_2d_ptr_->points[i].gray_ODVL = 0;
-        
+
+        aver_ga_depth += cloud_2d_ptr_->points[i].gray_bearing_angle;
+        if ( cloud_2d_ptr_->points[i].gray_bearing_angle < 0) cout << "error ba:" <<  cloud_2d_ptr_->points[i].gray_bearing_angle << "\n";
     }
+    std::cout <<"sum ga:" << aver_ga_depth << "\n";
+    aver_ga_depth /= cloud_2d_ptr_->size();
+    std::cout <<"aver ga:" << aver_ga_depth << "\n";
+    // 计算方差
+    for (int i = 0; i < cloud_2d_ptr_->size(); i++)
+    {
+        var_ga += pow(cloud_2d_ptr_->points[i].gray_bearing_angle - aver_ga_depth, 2);
+        var_go += pow(cloud_2d_ptr_->points[i].gray_optimal_depth - aver_gray_optimal_depth , 2);
+    }
+    var_ga /= cloud_2d_ptr_->size();
+    var_go /= cloud_2d_ptr_->size();
+    std::cout <<"var ga:" << var_ga << "\n";
+    std::cout <<"var go:" << var_go << "\n";
+    
 }
 
 void Cslice_pcd::ReceivePointCloud(const sensor_msgs::PointCloud2::ConstPtr &pc_ptr)
@@ -494,12 +577,12 @@ void Cslice_pcd::OptimizationODVL()
     for (int i = 0; i < INIT_SEED_NUM; i++)
     {
         init_seed[i].param1 = GetRandNum();
-          std::cout << "check param1 :" << init_seed[i].param1 << "\n";
+        //std::cout << "check param1 :" << init_seed[i].param1 << "\n";
         init_seed[i].param2 = 1 - init_seed[i].param1;
         init_seed[i].var = CalculateVariance(init_seed[i].param1);
-        std::cout << "check var :" << init_seed[i].var << "\n";
+        //std::cout << "check var :" << init_seed[i].var << "\n";
         init_seed[i].gradient = CalculateGradient(init_seed[i].param1);
-        std::cout << "check gradient :" << init_seed[i].gradient << "\n";
+        //std::cout << "check gradient :" << init_seed[i].gradient << "\n";
     }
     for (int i = 0; i < MAX_ITER_NUM; i++)
     {
@@ -532,8 +615,8 @@ void Cslice_pcd::OptimizationODVL()
         {
             max_var = init_seed[0].var;
             max_param1 = init_seed[0].param1;
-            std::cout << "iter times :" << i  << "\nmax var now:" << init_seed[0].var << "\nparam1 now: " << init_seed[0].param1 << "\n";
         }
+        std::cout << "iter times :" << i + 1  << "\nmax var now:" << init_seed[0].var << "\nparam1 now: " << init_seed[0].param1 << "\n";
     }
 }
 
@@ -565,7 +648,7 @@ double Cslice_pcd::CalculateVariance(double parameter1)
         average += cloud_2d_ptr_->points[i].gray_ODVL;
     }
     average /= cloud_2d_ptr_->size();
-    std :: cout << "check average ODVL:" << average << "\n";
+    //std :: cout << "check average ODVL:" << average << "\n";
     #pragma omp for // OpenMP并行化执行这条语句后的for循环，从而起到加速的效果
     for (int i = 0; i < cloud_2d_ptr_->size(); i++)
     {
@@ -596,8 +679,8 @@ double Cslice_pcd::CalculateGradient(double parameter1)
     }
     aver_GB /= cloud_2d_ptr_->size();
     aver_GD /= cloud_2d_ptr_->size();
-    std :: cout << "check average GB:" << aver_GB << "\n";
-    std :: cout << "check average GD:" << aver_GD << "\n";
+    //std :: cout << "check average GB:" << aver_GB << "\n";
+    //std :: cout << "check average GD:" << aver_GD << "\n";
     #pragma omp for // OpenMP并行化执行这条语句后的for循环，从而起到加速的效果
     for (int i = 0; i < cloud_2d_ptr_->size(); i++)
     {
@@ -613,6 +696,30 @@ double Cslice_pcd::CalculateGradient(double parameter1)
 int cmp( const void *a ,const void *b) // 从大到小
 {
     return (*(Cseed *)a).var > (*(Cseed *)b).var? -1 : 1; 
+}
+
+void Cslice_pcd::CheckOrderedPC()
+{
+    int count = 0;
+    pcl::PointXYZI point;
+    std::string pcd_name = "check";
+
+    for (int i = 0; i < ordered_cloud_ptr_->height; i ++)
+    {
+        for (int j = 0; j < ordered_cloud_ptr_->width; j++)
+        {
+            point.x = ordered_cloud_ptr_->at(j,i).x;
+            point.y = ordered_cloud_ptr_->at(j,i).y;
+            point.z = ordered_cloud_ptr_->at(j,i).z;
+            point.intensity = (i +  1) * 30;
+            check_pcd_ptr_->push_back(point);
+        }
+    }
+    pcl::toROSMsg(*check_pcd_ptr_,output_);
+    output_.header.frame_id = "map";  // fixed_fram ----rviz
+    // pcl::io::savePCDFileASCII("/home/cyppt/catkin_ws/src/try_pcd/" + pcd_name + ".pcd", *check_pcd_ptr_);
+    // std::cout << "已输出待查看点云至：" << "/home/cyppt/catkin_ws/src/try_pcd/" + pcd_name << std::endl;
+    Pub_pcd();
 }
 
 
